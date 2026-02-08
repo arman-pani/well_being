@@ -3,7 +3,10 @@ import 'dart:convert';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 import 'package:well_being/app_barchart.dart';
+
+import 'DailyActivityModel.dart';
 
 class ActivityDetailPage extends StatefulWidget {
   const ActivityDetailPage({super.key});
@@ -13,21 +16,58 @@ class ActivityDetailPage extends StatefulWidget {
 }
 
 class _ActivityDetailPageState extends State<ActivityDetailPage> {
+  DateTime currentDate = DateTime.now();
+  DailyActivityModel? dailyActivity;
 
-  List<dynamic>? data;
+  List<Map<String, dynamic>>? weeklyData;
+
   static const platform = MethodChannel('com.flutter.well_being/stats');
-  Future<void> _getUsageStats() async {
+
+  Future<void> _getDailyUsageStats(DateTime date) async {
+    final formattedDate = DateFormat('dd-MM-yyyy').format(date);
     try {
-      debugPrint("FETCHING USAGE STATS");
-      final result = await platform.invokeMethod('getUsageStats');
-      debugPrint("FLUTTER RESULT : $result");
-      setState(() {
-        data = result;
+      final result = await platform.invokeMethod('getDailyUsageStats', {
+        'date': formattedDate,
       });
+      debugPrint("RESULT: $result");
+
+      if (result != null && result is List) {
+        final parsedList = result
+            .map((item) => ApplicationUsageModel.fromJson(Map<String, dynamic>.from(item)))
+            .toList();
+
+        setState(() {
+          dailyActivity = DailyActivityModel(
+            date: formattedDate,
+            applicationUsageList: parsedList,
+          );
+        });
+      }
     } on PlatformException catch (e) {
       debugPrint(e.toString());
     }
   }
+
+
+  Future<void> _getWeeklyUsageStats() async {
+    try {
+      final result = await platform.invokeMethod('getWeeklyUsageStats');
+      debugPrint("Weekly data : $result");
+
+      if (result != null && result is List) {
+        final parsedList = result
+            .map((item) => Map<String, dynamic>.from(item as Map))
+            .toList();
+
+        setState(() {
+          weeklyData = parsedList;
+        });
+      }
+    } on PlatformException catch (e) {
+      debugPrint(e.toString());
+    }
+  }
+
 
   String formatDuration(int milliseconds) {
     final totalMinutes = (milliseconds / 60000).floor();
@@ -41,13 +81,27 @@ class _ActivityDetailPageState extends State<ActivityDetailPage> {
       return '${minutes} minutes';
     }
   }
+
   @override
   void initState() {
     super.initState();
-    _getUsageStats();
+    _getDailyUsageStats(currentDate);
+    _getWeeklyUsageStats();
   }
+
+  int getTotalDuration() {
+    if (dailyActivity == null) return 0;
+    return dailyActivity!.applicationUsageList.fold(
+      0,
+      (sum, app) => sum + app.usageDuration,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final formattedTitle = DateFormat('EEE, dd MMM').format(currentDate);
+    final totalUsage = getTotalDuration();
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -66,18 +120,29 @@ class _ActivityDetailPageState extends State<ActivityDetailPage> {
               spacing: 20,
               children: [
                 Text(
-                  "3 hrs, 50 mins",
+                  formatDuration(totalUsage),
                   style: TextStyle(color: Colors.white, fontSize: 34),
                 ),
 
-                AspectRatio(aspectRatio: 2, child: Appbarchart()),
+                weeklyData == null
+                    ? CircularProgressIndicator()
+                    : AspectRatio(
+                  aspectRatio: 2,
+                  child: Appbarchart(weeklyData: weeklyData!)),
 
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                     IconButton(
-                      onPressed: () {},
+                      onPressed: () {
+                        setState(() {
+                          currentDate = currentDate.subtract(
+                            const Duration(days: 1),
+                          );
+                          _getDailyUsageStats(currentDate);
+                        });
+                      },
                       icon: Icon(
                         Icons.arrow_back_ios_rounded,
                         color: Colors.white,
@@ -85,11 +150,20 @@ class _ActivityDetailPageState extends State<ActivityDetailPage> {
                       ),
                     ),
                     Text(
-                      "Mon, 23 Jun",
+                      formattedTitle,
                       style: TextStyle(color: Colors.white, fontSize: 18),
                     ),
                     IconButton(
-                      onPressed: () {},
+                      onPressed: () {
+                        if (!isToday(currentDate)) {
+                          setState(() {
+                            currentDate = currentDate.add(
+                              const Duration(days: 1),
+                            );
+                            _getDailyUsageStats(currentDate);
+                          });
+                        }
+                      },
                       icon: Icon(
                         Icons.arrow_forward_ios_rounded,
                         color: Colors.white,
@@ -98,37 +172,78 @@ class _ActivityDetailPageState extends State<ActivityDetailPage> {
                     ),
                   ],
                 ),
-                data == null ?
-                CircularProgressIndicator() :
-                ListView.builder(
-                  itemCount: data?.length,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  padding: EdgeInsets.zero,
-                  scrollDirection: Axis.vertical,
-                  itemBuilder: (context, index) {
-                    final item = data![index];
-                    return ListTile(
-                      contentPadding: EdgeInsets.symmetric(horizontal: 5),
-                      title: Text(item['packageName'] ?? "NA", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold) ),
-                      subtitle: Text(formatDuration(item['totalTimeInForeground'])  ?? "NA", style: TextStyle(color: Colors.grey, fontSize: 14) ),
-                      leading: ClipRRect(
-                        borderRadius: BorderRadius.circular(10),
-                        child: Image.memory(
-                          base64Decode(item['packageLogo'] ?? ""),
-                          width: 40,
-                          height: 40,
-                        ),
+                dailyActivity == null
+                    ? CircularProgressIndicator()
+                    : ListView.builder(
+                        itemCount: dailyActivity!.applicationUsageList.length,
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        padding: EdgeInsets.zero,
+                        scrollDirection: Axis.vertical,
+                        itemBuilder: (context, index) {
+                          final app =
+                              dailyActivity!.applicationUsageList[index];
+                          final totalMinutes = (app.usageDuration / 60000)
+                              .floor();
+
+                          if (totalMinutes <= 0) return const SizedBox.shrink();
+                          return ListTile(
+                            contentPadding: EdgeInsets.symmetric(horizontal: 5),
+                            title: Text(
+                              app.name,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            subtitle: Text(
+                              formatDuration(app.usageDuration),
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 14,
+                              ),
+                            ),
+                            leading: ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: Image.memory(
+                                base64Decode(app.appLogo),
+                                width: 40,
+                                height: 40,
+                                errorBuilder: (context, error, stackTrace) =>
+                                    Container(
+                                      width: 40,
+                                      height: 40,
+                                      color: Colors.grey,
+                                      child: Icon(
+                                        Icons.broken_image,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                              ),
+                            ),
+                            trailing: IconButton(
+                              onPressed: () {},
+                              icon: Icon(
+                                Icons.hourglass_bottom,
+                                color: Colors.white,
+                              ),
+                            ),
+                          );
+                        },
                       ),
-                      trailing: IconButton(onPressed: (){}, icon: Icon(Icons.hourglass_bottom, color: Colors.white,)),
-                    );
-                  },
-                ),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  bool isToday(DateTime date) {
+    final now = DateTime.now();
+    return date.year == now.year &&
+        date.month == now.month &&
+        date.day == now.day;
   }
 }
